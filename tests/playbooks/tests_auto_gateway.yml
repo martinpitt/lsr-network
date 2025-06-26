@@ -49,11 +49,13 @@
       command: "ip route"
       register: ipv4_routes
       changed_when: false
+      when: __network_is_booted | bool
     - name: "Assert default ipv4 route is present"
       assert:
         that: __test_str in ipv4_routes.stdout
       vars:
         __test_str: default via 203.0.113.1 dev {{ interface }}
+      when: __network_is_booted | bool
     - name: "Get ipv6 routes"
       command: "ip -6 route"
       register: ipv6_route
@@ -115,6 +117,7 @@
       command: "ip route"
       register: ipv4_routes
       changed_when: false
+      when: __network_is_booted | bool
     - name: "Assert default ipv4 route is absent"
       assert:
         that: __test_str not in ipv4_routes.stdout
@@ -124,11 +127,13 @@
       command: "ip -6 route"
       register: ipv6_route
       changed_when: false
+      when: __network_is_booted | bool
     - name: "Assert default ipv6 route is absent"
       assert:
         that: __test_str not in ipv6_route.stdout
       vars:
         __test_str: default via 2001:db8::1 dev {{ interface }}
+      when: __network_is_booted | bool
       when: network_provider == "nm"
     - name: "TEARDOWN: remove profiles. again"
       debug:

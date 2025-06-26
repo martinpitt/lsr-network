@@ -72,26 +72,31 @@
             - "{{ controller_profile }}"
             - "{{ port1_profile }}"
             - "{{ port2_profile }}"
-        - name: "** TEST check polling interval"
-          command: grep 'Polling Interval'
-                   /proc/net/bonding/{{ controller_device }}
-          register: result
-          until: "'110' in result.stdout"
-          changed_when: false
-        - name: "** TEST check IPv4"
-          command: ip -4 a s {{ controller_device }}
-          register: result
-          until: "'192.0.2' in result.stdout"
-          retries: 20
-          delay: 2
-          changed_when: false
-        - name: "** TEST check IPv6"
-          command: ip -6 a s {{ controller_device }}
-          register: result
-          until: "'2001' in result.stdout"
-          retries: 20
-          delay: 2
-          changed_when: false
+
+        - name: Runtime checks for booted systems
+          when: __network_is_booted | bool
+          block:
+            - name: "** TEST check polling interval"
+              command: grep 'Polling Interval'
+                      /proc/net/bonding/{{ controller_device }}
+              register: result
+              until: "'110' in result.stdout"
+              changed_when: false
+            - name: "** TEST check IPv4"
+              command: ip -4 a s {{ controller_device }}
+              register: result
+              until: "'192.0.2' in result.stdout"
+              retries: 20
+              delay: 2
+              changed_when: false
+            - name: "** TEST check IPv6"
+              command: ip -6 a s {{ controller_device }}
+              register: result
+              until: "'2001' in result.stdout"
+              retries: 20
+              delay: 2
+              changed_when: false
+
       always:
         - name: Clean up the test devices and the connection profiles
           tags:
@@ -116,6 +121,7 @@
               command: ip link del {{ controller_device }}
               failed_when: false
               changed_when: false
+              when: __network_is_booted | bool
             - name: Import the task 'remove_test_interfaces_with_dhcp.yml'
               import_tasks: tasks/remove_test_interfaces_with_dhcp.yml
             - name: "Restore the /etc/resolv.conf for initscript"
@@ -125,3 +131,4 @@
               changed_when: false
             - name: Verify network state restored to default
               include_tasks: tasks/check_network_dns.yml
+              when: __network_is_booted | bool

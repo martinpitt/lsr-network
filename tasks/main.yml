@@ -151,7 +151,7 @@
 - name: Enable and start NetworkManager
   service:
     name: "{{ network_service_name }}"
-    state: started
+    state: "{{ 'started' if __network_is_booted else omit }}"
     enabled: true
   when:
     - network_provider == "nm" or network_state != {}
@@ -162,7 +162,7 @@
 - name: Enable and start wpa_supplicant
   service:
     name: wpa_supplicant
-    state: started
+    state: "{{ 'started' if __network_is_booted else omit }}"
     enabled: true
   when:
     - network_provider == "nm"

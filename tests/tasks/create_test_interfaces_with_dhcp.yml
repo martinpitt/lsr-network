@@ -14,6 +14,7 @@
   until: __install_status is success
   retries: 6
   delay: 10
+  when: ansible_connection != "buildah"
 
 - name: Install pgrep, sysctl
   package:
@@ -24,6 +25,7 @@
   when:
     - ansible_os_family == 'RedHat'
     - ansible_distribution_major_version is version('6', '<=')
+    - ansible_connection != "buildah"
 
 - name: Install pgrep, sysctl
   package:
@@ -143,3 +145,4 @@
             --dhcp-host 52:54:00:12:34:56,ignore --dhcp-host 52:54:00:12:34:57,ignore
     fi
   changed_when: false
+  when: ansible_connection != "buildah"

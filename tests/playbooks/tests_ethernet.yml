@@ -70,13 +70,17 @@
       command: "nmcli connection show {{ interface }}"
       changed_when: false
       register: nm_connection_status
-      when: network_provider == 'nm'
+      when:
+        - __network_is_booted | bool
+        - network_provider == 'nm'
 
     - name: Assert NM connection status
       assert:
         that:
           - nm_connection_status.stdout is search("ipv4.addresses:\s+192.0.2.1/24")
-      when: network_provider == 'nm'
+      when:
+        - __network_is_booted | bool
+        - network_provider == 'nm'
 
     - name: Get initscripts connection file
       slurp:
@@ -97,6 +101,7 @@
       include_tasks: tasks/down_profile+delete_interface.yml
       vars:
         profile: "{{ interface }}"
+      when: __network_is_booted | bool
 
     # FIXME: assert profile/device down
     - name: Include the task 'remove_profile.yml'

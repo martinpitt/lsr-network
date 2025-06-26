@@ -128,8 +128,10 @@
               command: ip link del {{ controller_device }}
               failed_when: false
               changed_when: false
+              when: __network_is_booted | bool
             - name: Import the task 'remove_test_interfaces_with_dhcp.yml'
               import_tasks: tasks/remove_test_interfaces_with_dhcp.yml
+              when: __network_is_booted | bool
             - name: Restore the /etc/resolv.conf for initscript
               command: mv -vf /etc/resolv.conf.bak /etc/resolv.conf
               when:
