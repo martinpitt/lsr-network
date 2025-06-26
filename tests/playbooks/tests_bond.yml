@@ -97,6 +97,58 @@
               delay: 2
               changed_when: false
 
+        # These are primarily interesting for non-booted systems; but let's
+        # check on booted systems too, to ensure the assertions are valid
+        - name: NM Config file checks
+          when: network_provider != "initscripts"
+          block:
+            - name: Read controller config
+              slurp:
+                src: "/etc/NetworkManager/system-connections/{{ controller_profile }}.nmconnection"
+              register: controller_config_b64
+
+            - name: Check controller config
+              assert:
+                that:
+                  # [connection]
+                  - "'id=' + controller_profile in controller_config"
+                  - "'type=bond' in controller_config"
+                  - "'interface-name=' + controller_device in controller_config"
+                  # [bond]
+                  - "'mode=active-backup' in controller_config"
+                  - "'miimon=110' in controller_config"
+                  # [ipv4]
+                  - "'method=auto' in controller_config"
+                  - "'route-metric=65535' in controller_config"
+                fail_msg: "{{ controller_profile }} is bad: {{ controller_config }}"
+              vars:
+                controller_config: "{{ controller_config_b64.content | b64decode }}"
+
+            - name: Read port configs
+              loop:
+                - { name: "{{ port1_profile }}", iface_name: "{{ dhcp_interface1 }}" }
+                - { name: "{{ port2_profile }}", iface_name: "{{ dhcp_interface2 }}" }
+              slurp:
+                src: "/etc/NetworkManager/system-connections/{{ item.name }}.nmconnection"
+              register: port1_config_b64
+
+            - name: Check port configs
+              loop: "{{ port1_config_b64.results }}"
+              vars:
+                port_config: "{{ item.content | b64decode }}"
+              assert:
+                that:
+                  # [connection]
+                  - "'id=' + item.item.name  in port_config"
+                  - "'type=ethernet' in port_config"
+                  # that points to UUID of controller, a bit cumbersome to match; but let's assume nmcli DTRT
+                  - "'controller=' in port_config"
+                  - "'interface-name=' + item.item.iface_name in port_config"
+                  - "'port-type=bond' in port_config"
+                  - "'[ipv4]' not in port_config"
+                  - "'[ipv6]' not in port_config"
+                fail_msg: "{{ item.item.name }} is bad: {{ port_config }}"
+
       always:
         - name: Clean up the test devices and the connection profiles
           tags:

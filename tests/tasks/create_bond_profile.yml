@@ -16,7 +16,8 @@
           ad_actor_system: 00:00:5e:00:53:5d
           ad_select: stable
           ad_user_port_key: 1023
-          all_ports_active: true
+          # FIXME: nmcli --offline does not know about this option
+          all_ports_active: "{{ omit if network_provider == 'nm_offline' else true }}"
           downdelay: 0
           lacp_rate: slow
           lp_interval: 128

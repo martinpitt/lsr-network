@@ -66,17 +66,25 @@
               rule_append_only: true
 
     - name: Verify nmcli connection DNS entry for IPv4
-      shell: |
-        set -euxo pipefail
-        nmcli connection show {{ interface }} | grep ipv4.dns
+      shell: >-
+        set -euxo pipefail;
+        {{
+          ("nmcli connection show " ~ interface ~ " | grep ipv4.dns")
+          if __network_is_booted else
+          ("sed -n '/^\[ipv4\]/,/^$/ {/dns.*=/p}' /etc/NetworkManager/system-connections/" ~ interface ~ ".nmconnection")
+        }}
       register: ipv4_dns
       ignore_errors: true
       changed_when: false
 
     - name: Verify nmcli connection DNS entry for IPv6
-      shell: |
-        set -euxo pipefail
-        nmcli connection show {{ interface }} | grep ipv6.dns
+      shell: >-
+        set -euxo pipefail;
+        {{
+          ("nmcli connection show " ~ interface ~ " | grep ipv6.dns")
+          if __network_is_booted else
+          ("sed -n '/^\[ipv6\]/,/^$/ {/dns.*=/p}' /etc/NetworkManager/system-connections/" ~ interface ~ ".nmconnection")
+        }}
       register: ipv6_dns
       ignore_errors: true
       changed_when: false

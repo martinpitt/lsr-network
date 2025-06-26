@@ -1728,7 +1728,7 @@ class RunEnvironment(object):
     ):
         raise NotImplementedError()
 
-    def run_command(self, argv, encoding=None):
+    def run_command(self, argv, encoding=None, check_rc=False):
         raise NotImplementedError()
 
     def _check_mode_changed(self, old_check_mode, new_check_mode, connections):
@@ -1783,8 +1783,8 @@ class RunEnvironmentAnsible(RunEnvironment):
     def ifcfg_header(self):
         return self.module.params["__header"]
 
-    def run_command(self, argv, encoding=None):
-        return self.module.run_command(argv, encoding=encoding)
+    def run_command(self, argv, encoding=None, check_rc=False):
+        return self.module.run_command(argv, encoding=encoding, check_rc=check_rc)
 
     def _run_results_push(self, n_connections):
         c = []
@@ -1935,8 +1935,8 @@ class Cmd(object):
         self._is_changed_modified_system = False
         self._debug_flags = debug_flags
 
-    def run_command(self, argv, encoding=None):
-        return self.run_env.run_command(argv, encoding=encoding)
+    def run_command(self, argv, encoding=None, check_rc=False):
+        return self.run_env.run_command(argv, encoding=encoding, check_rc=check_rc)
 
     @property
     def is_changed_modified_system(self):
@@ -2030,6 +2030,8 @@ class Cmd(object):
     def create(provider, **kwargs):
         if provider == "nm":
             return Cmd_nm(**kwargs)
+        if provider == "nm_offline":
+            return Cmd_nm_offline(**kwargs)
         elif provider == "initscripts":
             return Cmd_initscripts(**kwargs)
         raise MyError("unsupported provider %s" % (provider))
@@ -2630,6 +2632,230 @@ class Cmd_nm(Cmd):
         ):
             self.connections_data_set_changed(idx)
         logger.removeHandler(log_handler)
+
+
+###############################################################################
+
+
+class Cmd_nm_offline(Cmd):
+    def __init__(self, **kwargs):
+        Cmd.__init__(self, **kwargs)
+        self.validate_one_type = ArgValidator_ListConnections.VALIDATE_ONE_MODE_NM
+        self._checkpoint = None
+
+    def profile_path(self, name):
+        return os.path.join("/etc/NetworkManager/system-connections", name + ".nmconnection")
+
+    def run_prepare(self):
+        # we can't check any hardware or runtime status, we can just trust the input
+        pass
+
+    # mirror Cmd_nm.connection_create()
+    def connection_create(self, connection, idx):
+        # global/type independent arguments
+        argv = [
+            "nmcli", "--offline", "connection", "add",
+            "ifname", connection["interface_name"],
+            "con-name", connection["name"],
+            "type", connection["type"],
+            "autoconnect", "yes" if connection["autoconnect"] else "no",
+            "connection.autoconnect-retries", str(connection["autoconnect_retries"]),
+        ]
+
+        if connection["cloned_mac"] != "default":
+            argv.extend(["cloned-mac", connection["cloned_mac"]])
+
+        # composite devices
+        if connection["controller"] is not None:
+            if connection["port_type"] is None:
+                self.log_error(idx, "connection.port-type must be specified when connection.controller is set")
+            argv.extend(["connection.controller", connection["controller"],
+                         "connection.port-type", connection["port_type"]])
+
+            # skip IP and other config for composites
+            return argv
+
+        #
+        # addresses
+        #
+        # looks like this:
+        # ip: {
+        #     ✔️ 'address': [{'address': '192.0.2.1', 'family': <AddressFamily.AF_INET: 2>, 'prefix': 24}],
+        #     ✔️ 'dhcp4': False,
+        #     'dhcp4_send_hostname': None,
+        #     ✔️ 'gateway4': None,
+        #     ✔️ 'route_metric4': None,
+        #     ✔️ 'route_metric6': None
+        #     ✔️ 'auto6': True,
+        #     ✔️ 'ipv4_ignore_auto_dns': True|False|None,
+        #     ✔️ 'ipv6_ignore_auto_dns': True|False|None,
+        #     'wait_ip': 'any',
+        #     ✔️ 'ipv6_disabled': False
+        #     ✔️ 'gateway6': None
+        #     'auto_gateway': None
+        #     'route': []
+        #     'route_append_only': False
+        #     'rule_append_only': False
+        #     ✔️ 'dns': [{'family': <AddressFamily.AF_INET6: 10>, 'address': '2001:db8::20'}]
+        #     ✔️ 'dns_search': ["example.com"]
+        #     ✔️ 'dns_options': ['no-aaaa']
+        #     ✔️ 'dns_priority': 0
+        #     'routing_rule': []
+        # }
+        c_ip = connection["ip"]
+        ip4_addrs = []
+        ip6_addrs = []
+        for address in c_ip["address"]:
+            addr = "{0}/{1}".format(address["address"], address["prefix"])
+            if address["family"] == socket.AF_INET:
+                ip4_addrs.append(addr)
+            elif address["family"] == socket.AF_INET6:
+                ip6_addrs.append(addr)
+            else:
+                self.log_error(idx, "unknown address family %s" % (address["family"]))
+
+        argv.extend(["ipv4.method",
+                     "auto" if c_ip["dhcp4"] else
+                     "manual" if ip4_addrs else
+                     "disabled",
+                     "ipv4.addresses", ", ".join(ip4_addrs),
+
+                     "ipv6.method",
+                     "disabled" if c_ip["ipv6_disabled"] else
+                     "auto" if c_ip["auto6"] else
+                     "manual" if ip6_addrs else
+                     # online backend uses legacy "ignore", DTRT for this new backend
+                     "link-local",
+
+                     "ipv6.addresses", ", ".join(ip6_addrs)])
+
+        # gateway
+        if c_ip["gateway4"]:
+            argv.extend(["ipv4.gateway", c_ip["gateway4"]])
+        if c_ip["gateway6"]:
+            argv.extend(["ipv6.gateway", c_ip["gateway6"]])
+
+        # dns*
+        dns4_addrs = []
+        dns6_addrs = []
+        for dns in c_ip["dns"]:
+            if dns["family"] == socket.AF_INET:
+                dns4_addrs.append(dns["address"])
+            elif dns["family"] == socket.AF_INET6:
+                dns6_addrs.append(dns["address"])
+            else:
+                self.log_error(idx, "unknown DNS address family %s" % (dns["family"]))
+        if dns4_addrs:
+            argv.extend(["ipv4.dns", ",".join(dns4_addrs)])
+        if dns6_addrs:
+            argv.extend(["ipv6.dns", ",".join(dns6_addrs)])
+
+        if c_ip["dns_search"]:
+            # NM only allows to configure ipvN.dns-search when IPvN is enabled
+            if c_ip["dhcp4"] or ip4_addrs:
+                argv.extend(["ipv4.dns-search", " ".join(c_ip["dns_search"])])
+            if c_ip["auto6"] or ip6_addrs:
+                argv.extend(["ipv6.dns-search", " ".join(c_ip["dns_search"])])
+
+        if c_ip["dns_options"]:
+            argv.extend(["ipv4.dns-options", ",".join(c_ip["dns_options"]),
+                         "ipv6.dns-options", ",".join(c_ip["dns_options"])])
+
+        if c_ip["dns_priority"] != 0:
+            argv.extend(["ipv4.dns-priority", str(c_ip["dns_priority"]),
+                         "ipv6.dns-priority", str(c_ip["dns_priority"])])
+
+        if c_ip["ipv4_ignore_auto_dns"] is not None:
+            argv.extend(["ipv4.ignore-auto-dns", "yes" if c_ip["ipv4_ignore_auto_dns"] else "no"])
+        if c_ip["ipv6_ignore_auto_dns"] is not None:
+            argv.extend(["ipv6.ignore-auto-dns", "yes" if c_ip["ipv6_ignore_auto_dns"] else "no"])
+
+        # route
+        if c_ip["route_metric4"] is not None:
+            argv.extend(["ipv4.route-metric", str(c_ip["route_metric4"])])
+        if c_ip["route_metric6"] is not None:
+            argv.extend(["ipv6.route-metric", str(c_ip["route_metric6"])])
+
+        # bond
+        if connection["type"] == "bond":
+            opts = []
+            for k, v in connection["bond"].items():
+                if v is not None:
+                    if isinstance(v, bool):
+                        v = int(v)
+                    opts.append("{0}={1}".format(k, str(v)))
+            if opts:
+                argv.extend(["bond.options", ",".join(opts)])
+
+        # TODO: these connection fields still need to be implemented:
+        # persistent_state: present
+        # zone: None
+        # ethernet: {'autoneg': None, 'speed': 0, 'duplex': None}
+        # parent: None
+        # force_state_change: None
+        # wireless: None
+        # match: {}
+        # ignore_errors: None
+        # wait: None
+        # mac: None
+        # ethtool: {'features': {'esp_hw_offload': None, 'esp_tx_csum_hw_offload': None, 'fcoe_mtu': None, 'gro': None, 'gso': None, 'highdma': None, 'hw_tc_offload': None, 'l2_fwd_offload': None, 'loopback': None, 'lro': None, 'ntuple': None, 'rx': None, 'rxhash': None, 'rxvlan': None, 'rx_all': None, 'rx_fcs': None, 'rx_gro_hw': None, 'rx_udp_tunnel_port_offload': None, 'rx_vlan_filter': None, 'rx_vlan_stag_filter': None, 'rx_vlan_stag_hw_parse': None, 'sg': None, 'tls_hw_record': None, 'tls_hw_tx_offload': None, 'tso': None, 'tx': None, 'txvlan': None, 'tx_checksum_fcoe_crc': None, 'tx_checksum_ipv4': None, 'tx_checksum_ipv6': None, 'tx_checksum_ip_generic': None, 'tx_checksum_sctp': None, 'tx_esp_segmentation': None, 'tx_fcoe_segmentation': None, 'tx_gre_csum_segmentation': None, 'tx_gre_segmentation': None, 'tx_gso_partial': None, 'tx_gso_robust': None, 'tx_ipxip4_segmentation': None, 'tx_ipxip6_segmentation': None, 'tx_nocache_copy': None, 'tx_scatter_gather': None, 'tx_scatter_gather_fraglist': None, 'tx_sctp_segmentation': None, 'tx_tcp6_segmentation': None, 'tx_tcp_ecn_segmentation': None, 'tx_tcp_mangleid_segmentation': None, 'tx_tcp_segmentation': None, 'tx_udp_segmentation': None, 'tx_udp_tnl_csum_segmentation': None, 'tx_udp_tnl_segmentation': None, 'tx_vlan_stag_hw_insert': None}, 'coalesce': {'adaptive_rx': None, 'adaptive_tx': None, 'pkt_rate_high': None, 'pkt_rate_low': None, 'rx_frames': None, 'rx_frames_high': None, 'rx_frames_irq': None, 'rx_frames_low': None, 'rx_usecs': None, 'rx_usecs_high': None, 'rx_usecs_irq': None, 'rx_usecs_low': None, 'sample_interval': None, 'stats_block_usecs': None, 'tx_frames': None, 'tx_frames_high': None, 'tx_frames_irq': None, 'tx_frames_low': None, 'tx_usecs': None, 'tx_usecs_high': None, 'tx_usecs_irq': None, 'tx_usecs_low': None}, 'ring': {'rx': None, 'rx_jumbo': None, 'rx_mini': None, 'tx': None}}
+        # ieee802_1x: None
+        # mtu: None
+        # team, bridge, etc.
+
+        return argv
+
+    def run_action_present(self, idx):
+        connection = self.connections[idx]
+
+        if not connection.get("type"):
+            # this is mostly test teardown, nobody uses that in container builds
+            if connection["state"] == "down":
+                self.log_info(idx, "nm_offline ignoring 'state: down'")
+                return
+
+            self.log_error(idx, "Connection 'type' not specified")
+            return
+
+        # DEBUG, drop for final commit
+        self.log_info(idx, "XXX nm_offline provider action_present connection: %r" % connection)
+
+        # create the profile
+        (rc, out, err) = self.run_command(self.connection_create(connection, idx), check_rc=True)
+        # Should Not Happen™, but make sure
+        if not out.strip():
+            self.log_error(idx, "nmcli --offline returned no output (rc %d); err: %s" % (rc,  err))
+            return
+
+        path = self.profile_path(connection["name"])
+        if self.check_mode == CheckMode.REAL_RUN:
+            with open(path, "wb") as f:
+                f.write(out)
+            # DEBUG, drop for final commit
+            self.log_info(idx, "XXX nm_offline provider action_present: wrote %s: %s" % (path, out.decode("UTF-8")))
+
+        # nmcli always generates a new UUID, so comparing with existing file is moot
+        # always treat as changed, good enough for container builds
+        self.connections_data_set_changed(idx)
+
+    def run_action_absent(self, idx):
+        connection = self.connections[idx]
+        # DEBUG, drop for final commit
+        self.log_info(idx, "XXX nm_offline provider action_absent connection: %r" % connection)
+
+        try:
+            os.unlink(self.profile_path(connection["name"]))
+            self.connections_data_set_changed(idx)
+        except FileNotFoundError:
+            self.log_debug(idx, "nm_offline: profile '%s' already absent" % connection["name"])
+
+    def run_action_up(self, idx):
+        # no runtime ops in offline provider
+        pass
+
+    def run_action_down(self, idx):
+        # no runtime ops in offline provider
+        pass
 
 
 ###############################################################################
