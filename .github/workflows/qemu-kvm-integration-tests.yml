@@ -8,8 +8,6 @@ on:  # yamllint disable-line rule:truthy
     types:
       - checks_requested
   push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
